@@ -1,0 +1,442 @@
+<div align="center">
+
+# Information Retrieval Engine
+
+### Classement de documents Stack Exchange — Compétition Kaggle
+
+[![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
+[![PyTorch](https://img.shields.io/badge/PyTorch-2.10-EE4C2C?style=for-the-badge&logo=pytorch&logoColor=white)](https://pytorch.org)
+[![scikit-learn](https://img.shields.io/badge/scikit--learn-1.8-F7931E?style=for-the-badge&logo=scikitlearn&logoColor=white)](https://scikit-learn.org)
+[![Sentence Transformers](https://img.shields.io/badge/Sentence_Transformers-5.2-FFD21E?style=for-the-badge&logo=huggingface&logoColor=black)](https://www.sbert.net)
+[![BM25+](https://img.shields.io/badge/BM25%2B-rank--bm25-4B8BBE?style=for-the-badge)](https://github.com/dorianbrown/rank_bm25)
+[![Jupyter](https://img.shields.io/badge/Jupyter-4.5-F37626?style=for-the-badge&logo=jupyter&logoColor=white)](https://jupyter.org)
+[![Kaggle](https://img.shields.io/badge/Kaggle-Team%20Rocket-20BEFF?style=for-the-badge&logo=kaggle&logoColor=white)](https://www.kaggle.com/t/f383bc6c1f194226bb43d21ab3d65418)
+
+<br/>
+
+**Meilleur score `0.49541`** &nbsp;·&nbsp; **Classifier Macro-F1 `0.9852`** &nbsp;·&nbsp; **216 041 documents** &nbsp;·&nbsp; **141 requêtes**
+
+<br/>
+
+> **🌐 Langue :** &nbsp;[🇬🇧 Read in English](README.md) &nbsp;|&nbsp; 🇫🇷 Français
+
+</div>
+
+---
+
+## Table des matières
+
+- [Information Retrieval Engine](#information-retrieval-engine)
+    - [Classement de documents Stack Exchange — Compétition Kaggle](#classement-de-documents-stack-exchange--compétition-kaggle)
+  - [Table des matières](#table-des-matières)
+  - [Vue d'ensemble](#vue-densemble)
+  - [Pipeline](#pipeline)
+    - [Phase 1 — Récupération hybride](#phase-1--récupération-hybride)
+    - [Phase 2 — Classification et réordonnancement](#phase-2--classification-et-réordonnancement)
+  - [Structure du projet](#structure-du-projet)
+  - [Démarrage rapide](#démarrage-rapide)
+    - [Prérequis](#prérequis)
+    - [Installation](#installation)
+    - [Récupération des données](#récupération-des-données)
+  - [Utilisation](#utilisation)
+    - [Phase 1 — Récupération hybride](#phase-1--récupération-hybride-1)
+    - [Phase 2 — Classification \& Réordonnancement](#phase-2--classification--réordonnancement)
+    - [Aperçu des notebooks](#aperçu-des-notebooks)
+  - [Configuration](#configuration)
+  - [Résultats](#résultats)
+    - [Classement Kaggle](#classement-kaggle)
+    - [Ablation classificateur (notebook 07)](#ablation-classificateur-notebook-07)
+    - [Performances par catégorie (meilleur modèle)](#performances-par-catégorie-meilleur-modèle)
+  - [Auteur](#auteur)
+
+---
+
+## Vue d'ensemble
+
+Ce projet est un **système de recherche d'information en deux phases** développé dans le cadre d'une compétition Kaggle universitaire sur l'écosystème Stack Exchange. À partir de 141 requêtes en langage naturel, le système classe **216 041 documents techniques** provenant de cinq communautés — *Android, Gaming, Programmers, TeX, Unix* — et retourne les 100 documents les plus pertinents par requête.
+
+Le système combine :
+- **Récupération sparse** — BM25+ avec un tokenizer adapté aux termes techniques (`c++`, `c#`, `.net`, …)
+- **Récupération dense** — embeddings sémantiques via `all-MiniLM-L12-v2` avec cache SHA-256
+- **Fusion** — Reciprocal Rank Fusion (RRF) pour combiner les deux signaux
+- **Classification** — LinearSVC pour prédire la communauté Stack Exchange source
+- **Réordonnancement** — filtre dur promouvant les documents correspondant à la catégorie prédite
+
+---
+
+## Pipeline
+
+### Phase 1 — Récupération hybride
+
+```
+                          ┌─────────────────────────────┐
+                          │          Requête brute      │
+                          └──────────────┬──────────────┘
+                                         │
+               ┌─────────────────────────┴─────────────────────────┐
+               │                                                   │
+               ▼                                                   ▼
+   ┌───────────────────────┐                        ┌───────────────────────────┐
+   │    Branche BM25+      │                        │   Branche Embeddings      │
+   │                       │                        │                           │
+   │  Tokenizer technique  │                        │  all-MiniLM-L12-v2        │
+   │  (c++, c#, .net, …)   │                        │  Vecteurs 384 dimensions  │
+   │  BM25Plus sur 216k    │                        │  Cache SHA-256 (.npy)     │
+   │  documents            │                        │  Similarité cosinus       │
+   │                       │                        │  GPU / MPS / CPU auto     │
+   └───────────┬───────────┘                        └─────────────┬─────────────┘
+               │                                                  │
+               │  rank_bm25(d)                       rank_emb(d)  │
+               │                                                  │
+               └─────────────────────┬────────────────────────────┘
+                                     │
+                                     ▼
+                      ┌──────────────────────────────┐
+                      │       Fusion RRF             │
+                      │                              │
+                      │  score(d) =                  │
+                      │    w_emb  / (k + rank_emb)   │
+                      │  + w_bm25 / (k + rank_bm25)  │
+                      │                              │
+                      │  w_emb=3.5  w_bm25=0.5  k=20 │
+                      └──────────────┬───────────────┘
+                                     │
+                                     ▼
+                              Top-100 documents
+```
+
+**Paramètres clés :**
+
+| Paramètre | Défaut | Description |
+|---|---|---|
+| `embedding_model_name` | `all-MiniLM-L12-v2` | Modèle SentenceTransformer |
+| `hybrid_rrf_k` | `20` | Constante RRF (amortissement du rang) |
+| `hybrid_weight_embeddings` | `3.5` | Poids de la branche embeddings |
+| `hybrid_weight_bm25` | `0.5` | Poids de la branche BM25 |
+| `top_k` | `100` | Nombre de résultats retournés |
+
+---
+
+### Phase 2 — Classification et réordonnancement
+
+```
+                          ┌─────────────────────────────┐
+                          │        Requête de test      │
+                          └──────────────┬──────────────┘
+                                         │
+                                         ▼
+                      ┌──────────────────────────────────┐
+                      │  1. Extraction de features       │
+                      │     TF-IDF (~5 000 termes)       │
+                      │     ajusté sur 216k documents    │
+                      └──────────────┬───────────────────┘
+                                     │
+                                     ▼
+                      ┌──────────────────────────────────┐
+                      │  2. Classificateur LinearSVC     │
+                      │     Macro-F1 = 0.9852            │
+                      │     → catégorie prédite          │
+                      │     android | gaming | tex |     │
+                      │     unix | programmers           │
+                      └──────────────┬───────────────────┘
+                                     │
+                    ┌────────────────┴────────────────┐
+                    │                                 │
+                    ▼                                 ▼
+     ┌──────────────────────────┐     ┌──────────────────────────────┐
+     │  3. Expansion de requête │     │  4. Retour de pertinence     │
+     │                          │     │     pseudo (PRF)             │
+     │  requête += vocab catég. │     │                              │
+     │  ex. "android" ajoute :  │     │  BM25 top-3 docs             │
+     │  "mobile app java kotlin │     │  → extraction de tags        │
+     │   apk development"       │     │  → ajout (max 10 tags)       │
+     └──────────────────────────┘     └──────────────────────────────┘
+                    │                                 │
+                    └────────────────┬────────────────┘
+                                     │
+                                     ▼
+                      ┌──────────────────────────────────┐
+                      │  5. Récupération hybride         │
+                      │     BM25+ + Embeddings + RRF     │
+                      │     Pool de candidats = 1 000    │
+                      │     (top_k × retrieval_k_mult.)  │
+                      └──────────────┬───────────────────┘
+                                     │
+                                     ▼
+                      ┌──────────────────────────────────┐
+                      │  6. Réordonnancement dur         │
+                      │     Docs catég. match → devant   │
+                      │     Ordre relatif préservé       │
+                      └──────────────┬───────────────────┘
+                                     │
+                                     ▼
+                            Classement final Top-100
+```
+
+**Paramètres clés :**
+
+| Paramètre | Défaut | Description |
+|---|---|---|
+| `classifier_method` | `svc` | `svc` \| `logreg` \| `nb` \| `mlp` |
+| `feature_method` | `tfidf` | `tfidf` \| `count` \| `embeddings` |
+| `rerank_strategy` | `hard_filter` | `hard_filter` \| `soft_boost` |
+| `retrieval_k_multiplier` | `10` | Pool de candidats = `top_k × 10` |
+| `prf_top_k` | `3` | Nombre de documents de retour PRF |
+| `prf_max_tags` | `10` | Nombre max de tags injectés via PRF |
+| `hybrid_rrf_k` | `30` | Constante RRF pour la Phase 2 |
+
+---
+
+## Structure du projet
+
+```
+.
+├── src/                              # Bibliothèque principale
+│   ├── config.py                     # Configs dataclass & résolution des chemins
+│   ├── data/
+│   │   ├── load.py                   # Chargeur JSON
+│   │   └── preprocess.py             # Construction du champ content & nettoyage
+│   ├── retrieval/
+│   │   ├── tfidf.py                  # Baseline TF-IDF
+│   │   ├── bm25.py                   # BM25 / BM25+ avec tokenizer technique
+│   │   ├── embeddings.py             # Récupération dense + cache SHA-256
+│   │   └── hybrid.py                 # Fusion RRF
+│   ├── classification/
+│   │   ├── interfaces.py             # Définitions des catégories & protocoles
+│   │   ├── features.py               # Extraction de features (TF-IDF / Count / Embeddings)
+│   │   ├── model.py                  # Classificateur unifié (SVC / LogReg / MLP / NB)
+│   │   └── rerank.py                 # Stratégies hard_filter & soft_boost
+│   ├── evaluation/
+│   │   ├── metrics.py                # Precision@k, Recall@k, MRR@k, F1@k
+│   │   └── evaluate.py               # Pipelines d'évaluation
+│   └── kaggle/
+│       ├── format.py                 # Formateur CSV Kaggle
+│       ├── submit_prep.py            # Point d'entrée CLI Phase 1
+│       └── submit_phase2.py          # Point d'entrée CLI Phase 2
+│
+├── notebooks/                        # Exploration pas-à-pas & ablations
+│   ├── 01_data_exploration.ipynb     # EDA, statistiques du dataset
+│   ├── 02_tfidf_retrieval.ipynb      # Baseline TF-IDF
+│   ├── 03_bm25_retrieval.ipynb       # Réglage BM25 / BM25+
+│   ├── 04_embeddings_retrieval.ipynb # Récupération dense + UMAP
+│   ├── 05_evaluation_suite.ipynb     # Comparaison unifiée des méthodes
+│   ├── 06_phase1_submission.ipynb    # ★ Pipeline Phase 1 autonome
+│   ├── 07_phase2_classification_ablation.ipynb  # Ablation 11 configs
+│   ├── 08_phase2_pipeline_eval.ipynb # Évaluation complète Phase 2
+│   └── 09_phase2_submission.ipynb    # ★ Pipeline Phase 2 autonome
+│
+├── data/
+│   ├── raw/         # Fichiers JSON originaux (docs, queries, qrels)
+│   ├── processed/   # Champ content pré-construit
+│   └── cache/       # Tableaux .npy d'embeddings (clé SHA-256)
+│
+├── outputs/
+│   ├── runs/        # Logs d'évaluation (JSON)
+│   └── submissions/ # CSV de soumission Kaggle
+│
+└── requirements.txt
+```
+
+---
+
+## Démarrage rapide
+
+### Prérequis
+
+- Python **3.10+**
+- Un compte Kaggle + token API *(pour télécharger les données)*
+- GPU CUDA ou Apple Silicon *(optionnel — le CPU fonctionne aussi)*
+
+### Installation
+
+```bash
+# 1. Cloner le dépôt
+git clone https://github.com/thmsgo18/Information-Retrieval-Engine.git
+cd Information-Retrieval-Engine
+
+# 2. Créer et activer un environnement virtuel
+python3 -m venv venv
+source venv/bin/activate         # macOS / Linux
+# venv\Scripts\activate.bat      # Windows
+
+# 3. Installer les dépendances
+pip install -r requirements.txt
+```
+
+### Récupération des données
+
+```bash
+# Configurer les identifiants Kaggle (une seule fois)
+mkdir -p ~/.kaggle
+mv ~/Downloads/kaggle.json ~/.kaggle/
+chmod 600 ~/.kaggle/kaggle.json
+
+# Télécharger les données de la compétition
+cd data/raw
+kaggle competitions download -c retrieval-engine-competition
+unzip retrieval-engine-competition.zip && rm retrieval-engine-competition.zip
+cd ../..
+```
+
+Fichiers attendus dans `data/raw/` :
+```
+docs.json           ← 216 041 documents Stack Exchange
+queries_train.json  ← Requêtes d'entraînement avec vérité terrain
+queries_test.json   ← 141 requêtes de test (évaluation Kaggle)
+qgts_train.json     ← Jugements de pertinence
+```
+
+---
+
+## Utilisation
+
+### Phase 1 — Récupération hybride
+
+**CLI (recommandé) :**
+```bash
+# Configuration de production par défaut
+python3 -m src.kaggle.submit_prep
+
+# Test local rapide (sous-ensemble + modèle plus léger)
+python3 -m src.kaggle.submit_prep \
+  --max-docs 20000 \
+  --embedding-model-name all-MiniLM-L6-v2 \
+  --embedding-precision int8
+```
+
+**Notebook :**
+```bash
+jupyter lab
+# Ouvrir notebooks/06_phase1_submission.ipynb → Exécuter tout
+```
+
+Sortie : `outputs/submissions/submission.csv`
+
+---
+
+### Phase 2 — Classification & Réordonnancement
+
+**CLI (recommandé) :**
+```bash
+# Configuration de production par défaut
+python3 -m src.kaggle.submit_phase2
+
+# Options personnalisées
+python3 -m src.kaggle.submit_phase2 \
+  --classifier svc \
+  --feature-method tfidf \
+  --rerank hard_filter \
+  --embedding-model all-MiniLM-L12-v2
+```
+
+**Notebook :**
+```bash
+jupyter lab
+# Ouvrir notebooks/09_phase2_submission.ipynb → Exécuter tout
+# Détection automatique : local / Kaggle / Colab
+```
+
+Sorties :
+- `outputs/submissions/submission.csv`
+- `outputs/runs/phase2/run_YYYYMMDD_HHMMSS.json`
+
+---
+
+### Aperçu des notebooks
+
+| Notebook | Description |
+|---|---|
+| `01_data_exploration` | Statistiques du dataset, distribution par communauté |
+| `02_tfidf_retrieval` | Baseline TF-IDF : indexation, récupération, évaluation |
+| `03_bm25_retrieval` | Réglage et ablation BM25 / BM25+ |
+| `04_embeddings_retrieval` | Récupération dense SentenceTransformers + UMAP/t-SNE |
+| `05_evaluation_suite` | Precision@k, Recall@k, MRR@k sur toutes les méthodes |
+| `06_phase1_submission` | ★ Soumission Phase 1 complète Kaggle |
+| `07_phase2_classification_ablation` | Ablation 11 configs (3 features × 4 classifieurs) |
+| `08_phase2_pipeline_eval` | Évaluation complète Phase 2 & analyse d'erreurs |
+| `09_phase2_submission` | ★ Soumission finale Phase 2 (Kaggle/Colab/local) |
+
+**Ordre recommandé :** `01 → 02 → 03 → 04 → 05 → 06` (Phase 1), puis `07 → 08 → 09` (Phase 2).
+
+---
+
+## Configuration
+
+Tous les hyperparamètres sont centralisés dans [`src/config.py`](src/config.py) sous forme de dataclasses Python.
+
+**Phase 1 — `Phase1HybridSubmissionConfig` :**
+
+```python
+embedding_model_name: str = "all-MiniLM-L12-v2"
+embedding_batch_size: int = 64
+embedding_device: str | None = "auto"       # auto → cuda / mps / cpu
+embedding_precision: str = "float32"        # float32 | int8 | uint8 | binary
+hybrid_bm25_method: str = "plus"            # plus | okapi
+hybrid_rrf_k: int = 20
+hybrid_weight_embeddings: float = 3.5
+hybrid_weight_bm25: float = 0.5
+top_k: int = 100
+max_docs: int | None = None                 # None = corpus complet
+```
+
+**Phase 2 — `Phase2Config` :**
+
+```python
+classifier_method: str = "svc"              # svc | logreg | nb | mlp
+feature_method: str = "tfidf"              # tfidf | count | embeddings
+rerank_strategy: str = "hard_filter"       # hard_filter | soft_boost
+retrieval_k_multiplier: int = 10           # pool = top_k × 10
+prf_top_k: int = 3
+prf_max_tags: int = 10
+hybrid_rrf_k: int = 30
+hybrid_weight_embeddings: float = 3.5
+hybrid_weight_bm25: float = 0.5
+random_seed: int = 42
+```
+
+---
+
+## Résultats
+
+### Classement Kaggle
+
+| Phase | Configuration | Score |
+|---|---|---|
+| Phase 2 | SVC + hard_filter, RETRIEVAL_K=200, rrf_k=20 | 0.450 |
+| Phase 2 | SVC + hard_filter, RETRIEVAL_K=500, rrf_k=60 | 0.469 |
+| Phase 2 | SVC + hard_filter + cross-encoder, RETRIEVAL_K=1000 | 0.400 |
+| **Phase 2** | **SVC + hard_filter, RETRIEVAL_K=1000, rrf_k=30** | **0.49541 ✅** |
+
+### Ablation classificateur (notebook 07)
+
+| Features | Classificateur | Macro-F1 |
+|---|---|---|
+| **TF-IDF** | **LinearSVC** | **0.9852 ✅** |
+| TF-IDF | LogisticRegression | 0.9794 |
+| Count | LinearSVC | 0.9793 |
+| Embeddings | MLP | 0.9695 |
+
+### Performances par catégorie (meilleur modèle)
+
+| Catégorie | Précision | Rappel | F1 |
+|---|---|---|---|
+| android | ~0.99 | ~0.99 | ~0.99 |
+| gaming | ~0.97 | ~0.98 | ~0.97 |
+| programmers | ~0.99 | ~0.98 | ~0.98 |
+| tex | ~1.00 | ~1.00 | ~1.00 |
+| unix | ~0.99 | ~0.98 | ~0.99 |
+| **Macro moy.** | | | **0.9852** |
+
+---
+
+## Auteurs
+
+[Clara Ait Mokhtar](https://github.com/claraait123), [Maria Aydin](https://github.com/Mmajora53), [Vincent Tan](https://github.com/20centan), [Thomas Gourmelen](https://github.com/thmsgo18)
+
+---
+
+<div align="center">
+
+Master VMI et Master IAD — Projet Data Science 2025-2026 &nbsp;·&nbsp; Université Paris
+
+</div>
