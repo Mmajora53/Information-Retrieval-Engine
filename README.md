@@ -437,6 +437,6 @@ random_seed: int = 42
 
 <div align="center">
 
-Master VMI and Master IAD — Data Science Project 2025-2026 &nbsp;·&nbsp; Université Paris
+Master VMI and Master IAD — Data Science Project 2025-2026 &nbsp;·&nbsp; Université Paris Cité
 
 </div>
